@@ -14,10 +14,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+from openai import OpenAI
+
 
 # =======================================
 # ЗАГРУЗКА НАСТРОЕК
 # =======================================
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -258,6 +262,27 @@ async def show_results(cb: CallbackQuery, state: FSMContext):
 
     await cb.message.edit_text(text)
     await state.clear()
+
+async def ask_ai(prompt: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Ты умный и дружелюбный математический ассистент."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message["content"]
+
+@router.message(Command("helpme"))
+async def help_user(message: Message):
+    question = message.text.replace("/helpme", "").strip()
+    if not question:
+        await message.answer("Напиши так: /helpme  Как решить 2x + 5 = 15?")
+        return
+
+    answer = await ask_ai(question)
+    await message.answer(answer)
+
 
 # =======================================
 # ЗАПУСК
