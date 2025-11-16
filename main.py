@@ -199,20 +199,27 @@ async def show_question(target, state: FSMContext):
 # OPENROUTER / DEEPSEEK REQUEST
 # =======================================
 async def send_to_ai(text: str) -> str:
-    try:
-        resp = client.chat.completions.create(
-            model="tngtech/deepseek-r1t2-chimera:free",
-            extra_headers={
-                "HTTP-Referer": REFERER,
-                "X-Title": SITE_NAME,
-            },
-            messages=[{"role": "user", "content": text}]
-        )
+    for attempt in range(3):
+        try:
+            resp = client.chat.completions.create(
+                model="deepseek/deepseek-chat-v3",
+                extra_headers={
+                    "HTTP-Referer": REFERER,
+                    "X-Title": SITE_NAME,
+                },
+                extra_body={},
+                messages=[{"role": "user", "content": text}]
+            )
+            return resp.choices[0].message.content
 
-        return resp.choices[0].message.content
+        except Exception as e:
+            if "429" in str(e):
+                await asyncio.sleep(1.5)  # пауза и повтор
+                continue
+            return f"❗ Ошибка ИИ: {e}"
 
-    except Exception as e:
-        return f"❗ Ошибка ИИ: {e}"
+    return "❗ Сервер перегружен. Попробуй через пару секунд."
+
 
 
 # =======================================
