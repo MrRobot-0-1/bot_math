@@ -14,28 +14,39 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
+
+# =======================================
+# IMPORT OPENROUTER / DEEPSEEK
+# =======================================
 from openai import OpenAI
 
 
 # =======================================
-# ЗАГРУЗКА НАСТРОЕК
+# LOAD ENV
 # =======================================
-
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+REFERER = os.getenv("REFERER")
+SITE_NAME = os.getenv("SITE_NAME")
+
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN не найден. Создайте .env файл с BOT_TOKEN=...")
+    raise ValueError("Ошибка: BOT_TOKEN отсутствует в .env")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("Ошибка: OPENROUTER_API_KEY отсутствует в .env")
+
+# OpenRouter client
+client = OpenAI(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api/v1"
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode="HTML")   # фикс для aiogram 3.7+
-)
-
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -43,20 +54,24 @@ dp.include_router(router)
 
 DB_PATH = Path("math_questions.db")
 
-# =======================================
-# СОСТОЯНИЯ FSM
-# =======================================
 
+# =======================================
+# STATES
+# =======================================
 class TestStates(StatesGroup):
     choosing_type = State()
     choosing_grade = State()
     entering_name = State()
     answering = State()
 
-# =======================================
-# БАЗА ДАННЫХ
-# =======================================
 
+class HelpStates(StatesGroup):
+    waiting_question = State()
+
+
+# =======================================
+# DATABASE
+# =======================================
 def init_db():
     if DB_PATH.exists():
         DB_PATH.unlink()
@@ -77,58 +92,57 @@ def init_db():
         )
     """)
 
-    # ------- загрузка JSON файла -------
-    try:
-        with open("questions.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка загрузки questions.json: {e}")
-        conn.close()
-        raise
+    with open("questions.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    # ------- вставка вопросов -------
     for category, questions in data.items():
         for q in questions:
-            cur.execute(
-                "INSERT INTO questions (category, question, A, B, C, D, correct) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (category,
-                 q["question"],
-                 q["A"], q["B"], q["C"], q["D"],
-                 q["correct"].upper()
-                )
-            )
+            cur.execute("""
+                INSERT INTO questions (category, question, A, B, C, D, correct)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (
+                category,
+                q["question"],
+                q["A"], q["B"], q["C"], q["D"],
+                q["correct"].upper()
+            ))
 
     conn.commit()
     conn.close()
-    logger.info("База успешно создана из questions.json")
+    logger.info("База вопросов загружена успешно.")
+
 
 def get_questions(category: str):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute(
-        "SELECT question, A, B, C, D, correct FROM questions WHERE category = ?",
-        (category,)
-    )
+
+    cur.execute("""
+        SELECT question, A, B, C, D, correct
+        FROM questions
+        WHERE category = ?
+    """, (category,))
+
     rows = cur.fetchall()
     conn.close()
+
     random.shuffle(rows)
     return rows[:20]
 
 
 # =======================================
-# КЛАВИАТУРЫ
+# KEYBOARDS
 # =======================================
-
 def keyboard_start():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Школьники (1–11 класс)", callback_data="type_school")],
         [InlineKeyboardButton(text="Студенты (1–4 курс)", callback_data="type_uni")]
     ])
 
+
 def keyboard_grades(is_school: bool):
     grades = range(1, 12) if is_school else range(1, 5)
-
     rows, row = [], []
+
     for i, g in enumerate(grades, 1):
         row.append(
             InlineKeyboardButton(
@@ -139,23 +153,28 @@ def keyboard_grades(is_school: bool):
         if i % 3 == 0:
             rows.append(row)
             row = []
+
     if row:
         rows.append(row)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
 def keyboard_answers():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="A", callback_data="ans_A")],
-        [InlineKeyboardButton(text="B", callback_data="ans_B")],
-        [InlineKeyboardButton(text="C", callback_data="ans_C")],
-        [InlineKeyboardButton(text="D", callback_data="ans_D")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="A", callback_data="ans_A"),
+             InlineKeyboardButton(text="B", callback_data="ans_B")],
+            [InlineKeyboardButton(text="C", callback_data="ans_C"),
+             InlineKeyboardButton(text="D", callback_data="ans_D")],
+            [InlineKeyboardButton(text="🧠 Подсказка", callback_data="hint")]
+        ]
+    )
+
 
 # =======================================
-# ПОКАЗ ВОПРОСА
+# SHOW QUESTION
 # =======================================
-
 async def show_question(target, state: FSMContext):
     data = await state.get_data()
     i = data["index"]
@@ -175,41 +194,67 @@ async def show_question(target, state: FSMContext):
     else:
         await target.message.edit_text(text, reply_markup=keyboard_answers())
 
-# =======================================
-# ХЕНДЛЕРЫ
-# =======================================
 
+# =======================================
+# OPENROUTER / DEEPSEEK REQUEST
+# =======================================
+async def send_to_ai(text: str) -> str:
+    try:
+        resp = client.chat.completions.create(
+            model="tngtech/deepseek-r1t2-chimera:free",
+            extra_headers={
+                "HTTP-Referer": REFERER,
+                "X-Title": SITE_NAME,
+            },
+            messages=[{"role": "user", "content": text}]
+        )
+
+        return resp.choices[0].message.content
+
+    except Exception as e:
+        return f"❗ Ошибка ИИ: {e}"
+
+
+# =======================================
+# HANDLERS
+# =======================================
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("<b>Математический тест</b>\nВыберите категорию:", reply_markup=keyboard_start())
+    await message.answer(
+        "<b>Математический тест</b>\nВыберите категорию:",
+        reply_markup=keyboard_start()
+    )
     await state.set_state(TestStates.choosing_type)
+
 
 @router.callback_query(F.data.startswith("type_"))
 async def choose_type(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     is_school = cb.data == "type_school"
-    await state.update_data(is_school=is_school)
 
+    await state.update_data(is_school=is_school)
     await cb.message.edit_text("Выберите класс/курс:", reply_markup=keyboard_grades(is_school))
     await state.set_state(TestStates.choosing_grade)
+
 
 @router.callback_query(F.data.startswith("grade_"))
 async def choose_grade(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     grade = int(cb.data.split("_")[1])
+
     is_school = (await state.get_data())["is_school"]
+    category = f"school_{grade}" if is_school else f"uni_{grade}"
 
-    cat = f"school_{grade}" if is_school else f"uni_{grade}"
-
-    await state.update_data(grade=grade, category=cat)
-
+    await state.update_data(category=category, grade=grade)
     await cb.message.edit_text("Введите <b>ФИО полностью</b>:")
     await state.set_state(TestStates.entering_name)
+
 
 @router.message(TestStates.entering_name)
 async def enter_name(message: Message, state: FSMContext):
     name = message.text.strip()
+
     if len(name.split()) < 2:
         await message.answer("Введите ФИО полностью.")
         return
@@ -221,28 +266,28 @@ async def enter_name(message: Message, state: FSMContext):
 
     await state.update_data(questions=questions, index=0, correct=0)
     await show_question(message, state)
-
     await state.set_state(TestStates.answering)
+
 
 @router.callback_query(F.data.startswith("ans_"), TestStates.answering)
 async def process_answer(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
-    choice = cb.data.split("_")[1]  # A/B/C/D
 
+    choice = cb.data.split("_")[1]
     data = await state.get_data()
     q = data["questions"][data["index"]]
-    correct = q[5]
 
-    if choice == correct:
+    if choice == q[5]:
         await state.update_data(correct=data["correct"] + 1)
 
-    next_index = data["index"] + 1
-    await state.update_data(index=next_index)
+    i = data["index"] + 1
+    await state.update_data(index=i)
 
-    if next_index >= 20:
+    if i >= 20:
         await show_results(cb, state)
     else:
         await show_question(cb, state)
+
 
 async def show_results(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
@@ -255,43 +300,83 @@ async def show_results(cb: CallbackQuery, state: FSMContext):
         f"Правильных ответов: <b>{score}/20</b>\n\n"
     )
 
-    if score >= 18: text += "Отлично!"
-    elif score >= 15: text += "Очень хорошо!"
-    elif score >= 12: text += "Хорошо!"
-    else: text += "Нужно потренироваться!"
+    if score >= 18:
+        text += "Отлично!"
+    elif score >= 15:
+        text += "Очень хорошо!"
+    elif score >= 12:
+        text += "Хорошо!"
+    else:
+        text += "Нужно потренироваться!"
 
     await cb.message.edit_text(text)
     await state.clear()
 
-async def ask_ai(prompt: str) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Ты умный и дружелюбный математический ассистент."},
-            {"role": "user", "content": prompt}
-        ]
+
+# =======================================
+# HINT
+# =======================================
+@router.callback_query(F.data == "hint", TestStates.answering)
+async def send_hint_func(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+
+    data = await state.get_data()
+    q = data["questions"][data["index"]]
+    question_text = q[0]
+
+    # ⏳ отправляем оповещение
+    wait_msg = await cb.message.answer("⏳ Нейросеть думает... Подожди пару секунд 🤖")
+
+    hint = await send_to_ai(
+        f"Дай короткую подсказку для решения задачи: {question_text}. НЕ говори ответ."
     )
-    return response.choices[0].message["content"]
 
+    # удаляем оповещение
+    await wait_msg.delete()
+
+    await cb.message.answer(f"🧠 <b>Подсказка:</b>\n{hint}")
+
+
+
+# =======================================
+# /helpme
+# =======================================
 @router.message(Command("helpme"))
-async def help_user(message: Message):
-    question = message.text.replace("/helpme", "").strip()
-    if not question:
-        await message.answer("Напиши так: /helpme  Как решить 2x + 5 = 15?")
-        return
+async def helpme_cmd(message: Message, state: FSMContext):
+    await message.answer("Напиши задачу, с которой нужна помощь.")
+    await state.set_state(HelpStates.waiting_question)
 
-    answer = await ask_ai(question)
-    await message.answer(answer)
+
+@router.message(HelpStates.waiting_question)
+async def helpme_answer(message: Message, state: FSMContext):
+    user_question = message.text
+
+    # ⏳ Уведомление о генерации
+    wait_msg = await message.answer("⏳ Нейросеть думает… Подожди пару секунд 🤖")
+
+    # Генерация ответа ИИ
+    ai_answer = await send_to_ai(
+        f"Объясни решение задачи максимально понятно и простыми словами: {user_question}"
+    )
+
+    # Удаляем уведомление
+    await wait_msg.delete()
+
+    # Отправляем результат
+    await message.answer(ai_answer)
+
+    await state.clear()
+
 
 
 # =======================================
-# ЗАПУСК
+# START BOT
 # =======================================
-
 async def main():
     init_db()
     logger.info("Бот запущен!")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
